@@ -13,13 +13,14 @@ from crisp import CRISP
 from data import genenrate_hp_eval_text, generate_bio_eval_text, generate_cyber_eval_text, DataConfig, wmdp_bio_coherency_prompts, wmdp_cyber_coherency_prompts, hp_coherency_prompts
 from eval import get_mcq_accuracy
 from globals import set_seed, SEED, PROJECT_PATH
-from utils import save_model
+from crisp_utils import save_model
 
 @dataclass
 class UnlearnConfig:
     """Configuration for unlearning process"""
 
-    data_type: str # hp, bio, or cyber
+    data_type: str  # hp, bio, cyber, or concept
+    coherency_prompts: List[str] | None = None  # required when data_type="concept"
 
     # Learning parameters
     learning_rate: float = 1e-5
@@ -42,7 +43,9 @@ class UnlearnConfig:
     verbose: str = None
 
     def __post_init__(self):
-        assert self.data_type in ["hp", "bio", "cyber"]
+        assert self.data_type in ["hp", "bio", "cyber", "concept"]
+        if self.data_type == "concept" and not self.coherency_prompts:
+            raise ValueError("coherency_prompts must be provided when data_type='concept'")
 
         if self.verbose:
             self.verbose = self.data_type
@@ -352,14 +355,16 @@ def unlearn_lora(crisp: CRISP, text_target, text_benign, config: UnlearnConfig, 
 
             # Coherency loss - always enabled
             # Select coherency prompts based on target type
-            if config.data_type == "cyber":
+            if config.coherency_prompts is not None:
+                coherency_prompts = config.coherency_prompts
+            elif config.data_type == "cyber":
                 coherency_prompts = wmdp_cyber_coherency_prompts
             elif config.data_type == "hp":
                 coherency_prompts = hp_coherency_prompts
             elif config.data_type == "bio":
                 coherency_prompts = wmdp_bio_coherency_prompts
             else:
-                raise ValueError(f"Unknown data type: {config.data_type}. Valid options: ['hp', 'bio', 'cyber']")
+                raise ValueError(f"Unknown data type: {config.data_type}")
 
             text_idx = batch_idx % len(coherency_prompts)
             coher_text = coherency_prompts[text_idx]
@@ -387,7 +392,7 @@ def unlearn_lora(crisp: CRISP, text_target, text_benign, config: UnlearnConfig, 
             optimizer.step()
 
             # Print batch stats
-            if (batch_idx + 1) % 25 == 0:
+            if (batch_idx + 1) % 10 == 0:
                 str_print_loss = f"Batch {batch_idx+1}/{n_batches}, Loss: {batch_loss.item():.2e} " + \
                       f"(Unlearn: {loss_unlearn.item():.2e}, " + \
                       f"Reg: {reg_loss.item():.2e}, " + \

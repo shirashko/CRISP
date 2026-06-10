@@ -1,4 +1,4 @@
 from .crisp import CRISP, CRISPConfig, Feature, LayerFeatures
 from . import globals
-from . import utils
+from . import crisp_utils
 from . import sae

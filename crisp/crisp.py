@@ -9,8 +9,9 @@ from collections import OrderedDict
 from torch import Tensor
 from functools import partial
 from dataclasses import dataclass
-from globals import LLAMA_3_1_8B, GEMMA_2_2B, SAE_GEMMA_2_2B, SAE_LLAMA_3_1_8B
-from utils import load_cached_features, save_cached_features, print_memory_info
+from globals import (LLAMA_3_1_8B, GEMMA_2_2B, SAE_GEMMA_2_2B, SAE_LLAMA_3_1_8B,
+                     GEMMA_2_2B_IT, LLAMA_3_1_8B_IT, SAE_GEMMA_2_2B_IT, SAE_LLAMA_3_1_8B_IT)
+from crisp_utils import load_cached_features, save_cached_features, print_memory_info
 from peft import PeftModel
 
 
@@ -108,27 +109,30 @@ class LayerFeatures:
 @dataclass
 class CRISPConfig:
     layers: List[int]
-    model_name: Literal["gemma", "llama_3_1", "llama"]
+    model_name: Literal["gemma", "llama_3_1", "llama", "google/gemma-2-2b-it", "meta-llama/Llama-3.1-8B-Instruct"]
     bf16: bool = True
     saes_model_name: str = None
 
     def __post_init__(self):
         model_name_lower = self.model_name.lower()
 
-        if model_name_lower == "gemma" or self.model_name == GEMMA_2_2B:
+        if self.model_name == LLAMA_3_1_8B_IT or "llama-3.1-8b-instruct" in model_name_lower:
+            self.model_name = LLAMA_3_1_8B_IT
+            self.saes_model_name = SAE_LLAMA_3_1_8B_IT
+        elif self.model_name == GEMMA_2_2B_IT or "gemma-2-2b-it" in model_name_lower:
+            self.model_name = GEMMA_2_2B_IT
+            self.saes_model_name = SAE_GEMMA_2_2B_IT
+        elif model_name_lower == "gemma" or self.model_name == GEMMA_2_2B:
             self.model_name = GEMMA_2_2B
-        elif model_name_lower == "llama_3_1" or model_name_lower == "llama" or self.model_name == LLAMA_3_1_8B:
-            self.model_name = LLAMA_3_1_8B
-        else:
-            raise ValueError(f"Unsupported model name: {self.model_name}. Supported models are 'llama', 'gemma', and 'llama_3_1'.")
-
-        # Set SAE model name
-        if self.model_name == GEMMA_2_2B:
             self.saes_model_name = SAE_GEMMA_2_2B
-        elif self.model_name == LLAMA_3_1_8B:
+        elif model_name_lower in ("llama_3_1", "llama") or self.model_name == LLAMA_3_1_8B:
+            self.model_name = LLAMA_3_1_8B
             self.saes_model_name = SAE_LLAMA_3_1_8B
         else:
-            raise ValueError(f"Unsupported model name: {self.model_name}. Supported models are 'llama', 'gemma', and 'llama_3_1'.")
+            raise ValueError(
+                f"Unsupported model name: {self.model_name}. "
+                f"Supported: 'gemma', 'llama', 'llama_3_1', '{GEMMA_2_2B_IT}', '{LLAMA_3_1_8B_IT}'."
+            )
 
     def to_dict(self):
         return {
@@ -156,7 +160,16 @@ class CRISP:
         self.tokenizer = AutoTokenizer.from_pretrained(config.model_name)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.model = AutoModelForCausalLM.from_pretrained(config.model_name, device_map='auto', torch_dtype=torch.bfloat16 if config.bf16 else torch.float32)
-        self.model.config.use_cache = False if config.model_name == GEMMA_2_2B else True  # Gemma 2 has a bug with use_cache=True
+        gemma_models = (GEMMA_2_2B, GEMMA_2_2B_IT)
+        self.model.config.use_cache = False if config.model_name in gemma_models else True  # Gemma 2 has a bug with use_cache=True
+        if config.model_name in gemma_models:
+            # Gemma IT ties lm_head to input embeddings by default; detach so embedding
+            # edits don't silently corrupt the output projection.
+            with torch.no_grad():
+                self.model.lm_head.weight = torch.nn.Parameter(
+                    self.model.lm_head.weight.detach().clone()
+                )
+            self.model.config.tie_word_embeddings = False
         self.device_model = torch.device(self.model.device)
 
         self.features_dict = {}
