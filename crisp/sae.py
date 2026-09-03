@@ -12,7 +12,7 @@ from huggingface_hub import snapshot_download
 from natsort import natsorted
 from safetensors.torch import load_model, save_model
 from torch import Tensor, nn
-from globals import GEMMA_SAE_CACHE_PATH, LLAMA_3_1_SAE_CACHE_PATH
+from globals import GEMMA_SAE_CACHE_PATH, LLAMA_3_1_SAE_CACHE_PATH, QWEN35_SAE_CACHE_PATH, SAE_QWEN35_2B
 from crisp_utils import get_gpu_memory_info
 
 from dataclasses import dataclass
@@ -161,6 +161,8 @@ class Sae(nn.Module, abc.ABC):
             return TopkSae
         elif "gemma" in sae_type.lower():
             return JumpReLUSAE
+        elif "qwen" in sae_type.lower():
+            return QwenScopeTopkSae
         else:
             raise ValueError(f"Unknown SAE type: {sae_type}")
 
@@ -525,6 +527,178 @@ class TopkSae(Sae):
         self.W_dec.data /= norm + eps
 
 
+class QwenScopeTopkSae(Sae):
+    """Qwen-Scope residual Top-K SAE (``.pt`` checkpoint per layer)."""
+
+    def __init__(
+        self,
+        d_in: int,
+        d_sae: int,
+        k: int = 50,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+    ):
+        super().__init__(d_in, d_sae, device, dtype)
+        self.k = int(k)
+        self.W_enc = nn.Parameter(torch.zeros(d_sae, d_in, device=device, dtype=dtype))
+        self.W_dec = nn.Parameter(torch.zeros(d_in, d_sae, device=device, dtype=dtype))
+        self.b_enc = nn.Parameter(torch.zeros(d_sae, device=device, dtype=dtype))
+        self.b_dec = nn.Parameter(torch.zeros(d_in, device=device, dtype=dtype))
+
+    @property
+    def device(self) -> torch.device:
+        return self.W_enc.device
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.W_enc.dtype
+
+    def encode_pre_relu(self, x: Tensor) -> Tensor:
+        x = x.to(device=self.device, dtype=self.dtype)
+        return x @ self.W_enc.T + self.b_enc
+
+    def encode_hook(
+        self,
+        x: Tensor,
+        intervention_fn=None,
+        *intervention_args,
+        **intervention_kwargs,
+    ) -> Tensor:
+        pre_acts = self.encode_pre_relu(x)
+        if intervention_fn is not None:
+            pre_acts = intervention_fn(pre_acts, *intervention_args, **intervention_kwargs)
+        sparse_acts = torch.zeros_like(pre_acts)
+        topk_vals, topk_idx = pre_acts.topk(self.k, dim=-1)
+        sparse_acts.scatter_(-1, topk_idx, topk_vals)
+        return sparse_acts
+
+    def encode_activate(self, pre_relu: Tensor) -> Tensor:
+        sparse_acts = torch.zeros_like(pre_relu)
+        topk_vals, topk_idx = pre_relu.topk(self.k, dim=-1)
+        sparse_acts.scatter_(-1, topk_idx, topk_vals)
+        return sparse_acts
+
+    def encode(self, x: Tensor) -> Tensor:
+        return self.encode_hook(x)
+
+    def encode_top(self, x: Tensor) -> EncoderOutput:
+        pre_acts = self.encode_pre_relu(x)
+        topk_vals, topk_idx = pre_acts.topk(self.k, sorted=True, dim=-1)
+        return EncoderOutput(topk_vals, topk_idx)
+
+    def decode(self, acts: Tensor) -> Tensor:
+        acts = acts.to(device=self.device, dtype=self.dtype)
+        return acts @ self.W_dec + self.b_dec
+
+    def decode_top(self, top_acts: Tensor, top_indices: Tensor) -> Tensor:
+        top_acts = top_acts.to(device=self.device, dtype=self.dtype)
+        buf = top_acts.new_zeros(top_acts.shape[:-1] + (self.d_in,))
+        buf.scatter_add_(-1, top_indices, top_acts)
+        return buf @ self.W_dec + self.b_dec
+
+    def forward(self, x: Tensor, **kwargs) -> Tensor:
+        return self.decode(self.encode(x))
+
+    def save_to_disk(self, path: Path | str) -> None:
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "W_enc": self.W_enc.detach().cpu(),
+                "W_dec": self.W_dec.detach().cpu(),
+                "b_enc": self.b_enc.detach().cpu(),
+                "b_dec": self.b_dec.detach().cpu(),
+            },
+            path / "layer.sae.pt",
+        )
+        with open(path / "hyperparams.json", "w") as f:
+            json.dump(
+                {
+                    "d_model": self.d_in,
+                    "d_sae": self.d_sae,
+                    "top_k": self.k,
+                    "expansion_factor": self.d_sae // self.d_in,
+                    "sae_type": "qwen_scope_topk",
+                },
+                f,
+            )
+
+    @classmethod
+    def load_from_disk(
+        cls,
+        path: Path | str,
+        device: str | torch.device = "cpu",
+        decoder: bool = True,
+    ) -> "QwenScopeTopkSae":
+        path = Path(path)
+        pt_path = path / "layer.sae.pt"
+        if not pt_path.exists():
+            candidates = sorted(path.glob("*.sae.pt"))
+            if not candidates:
+                raise FileNotFoundError(f"No Qwen SAE checkpoint under {path}")
+            pt_path = candidates[0]
+
+        cfg_path = path / "hyperparams.json"
+        top_k = 50
+        if cfg_path.exists():
+            with open(cfg_path, "r") as f:
+                cfg = json.load(f)
+                top_k = int(cfg.get("top_k", top_k))
+
+        state = torch.load(pt_path, map_location=device, weights_only=False)
+        W_enc = state["W_enc"]
+        W_dec = state["W_dec"]
+        d_in = int(W_enc.shape[1])
+        d_sae = int(W_enc.shape[0])
+        sae = cls(d_in, d_sae, k=top_k, device=device, dtype=W_enc.dtype)
+        sae.W_enc.data.copy_(W_enc)
+        sae.W_dec.data.copy_(W_dec)
+        sae.b_enc.data.copy_(state["b_enc"])
+        sae.b_dec.data.copy_(state["b_dec"])
+        return sae
+
+    @classmethod
+    def download_and_save(
+        cls,
+        save_path: Path | str,
+        layer: int,
+        repo_id: str = SAE_QWEN35_2B,
+        device: str | torch.device = "cpu",
+        force_download: bool = False,
+    ) -> "QwenScopeTopkSae":
+        import shutil
+        from huggingface_hub import hf_hub_download
+
+        save_path = Path(save_path)
+        save_dir = save_path / f"layer_{layer}"
+        dst = save_dir / "layer.sae.pt"
+        if dst.exists() and not force_download:
+            print(f"Qwen SAE for layer {layer} already exists in cache at {save_dir}")
+            return cls.load_from_disk(save_dir, device=device)
+
+        src = hf_hub_download(
+            repo_id=repo_id,
+            filename=f"layer{layer}.sae.pt",
+            force_download=force_download,
+        )
+        save_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+
+        state = torch.load(dst, map_location="cpu", weights_only=False)
+        W_enc = state["W_enc"]
+        hyper = {
+            "d_model": int(W_enc.shape[1]),
+            "d_sae": int(W_enc.shape[0]),
+            "top_k": 50,
+            "expansion_factor": int(W_enc.shape[0] // W_enc.shape[1]),
+            "sae_type": "qwen_scope_topk",
+        }
+        with open(save_dir / "hyperparams.json", "w") as f:
+            json.dump(hyper, f)
+        print(f"Qwen SAE for layer {layer} downloaded and saved to {save_dir}")
+        return cls.load_from_disk(save_dir, device=device)
+
+
 class JumpReLUSAE(Sae):
     """Jump ReLU Sparse Autoencoder."""
 
@@ -802,6 +976,8 @@ class ModelSaes:
             cache_dir = GEMMA_SAE_CACHE_PATH
         elif "llama" in sae_type.lower():
             cache_dir = LLAMA_3_1_SAE_CACHE_PATH
+        elif "qwen" in sae_type.lower():
+            cache_dir = QWEN35_SAE_CACHE_PATH
         else:
             raise ValueError(f"Unknown SAE type: {sae_type}. Please specify a valid cache path.")
 

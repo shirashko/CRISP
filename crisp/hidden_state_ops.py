@@ -7,7 +7,7 @@ def hs_to_logits(model, hs, requires_grad=False):
     hs: tensor of shape (num_neurons, embed_dim)
     requires_grad: whether the hs tensor requires gradients. Default is False.
     '''
-    if model.config.model_type == 'gemma2':
+    if model.config.model_type in ('gemma2', 'qwen3_5', 'qwen3_5_text'):
         try:
             layer_norm = model.model.norm
             lm_head = model.lm_head
@@ -22,7 +22,10 @@ def hs_to_logits(model, hs, requires_grad=False):
             layer_norm = model.model.model.norm
             lm_head = model.lm_head
     else:
-        raise ValueError(f"Model type not supported {model.config.model_type}, supported models are 'gptj' and 'llama'")
+        raise ValueError(
+            f"Model type not supported {model.config.model_type}, "
+            "supported models are 'gemma2', 'llama', 'qwen3_5', 'qwen3_5_text'"
+        )
 
     # Ensure hs has the same dtype as model parameters
     model_dtype = next(model.parameters()).dtype

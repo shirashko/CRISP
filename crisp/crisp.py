@@ -10,9 +10,48 @@ from torch import Tensor
 from functools import partial
 from dataclasses import dataclass
 from globals import (LLAMA_3_1_8B, GEMMA_2_2B, SAE_GEMMA_2_2B, SAE_LLAMA_3_1_8B,
-                     GEMMA_2_2B_IT, LLAMA_3_1_8B_IT, SAE_GEMMA_2_2B_IT, SAE_LLAMA_3_1_8B_IT)
+                     GEMMA_2_2B_IT, LLAMA_3_1_8B_IT, SAE_GEMMA_2_2B_IT, SAE_LLAMA_3_1_8B_IT,
+                     QWEN35_2B, QWEN35_2B_IT, SAE_QWEN35_2B, SAE_QWEN35_2B_IT)
 from crisp_utils import load_cached_features, save_cached_features, print_memory_info
 from peft import PeftModel
+
+
+def _is_qwen35(model_name: str) -> bool:
+    n = model_name.lower()
+    return "qwen3.5" in n or "qwen3_5" in n
+
+
+def _load_hf_causal_lm(model_name: str, *, bf16: bool = True):
+    dtype = torch.bfloat16 if bf16 else torch.float32
+    if _is_qwen35(model_name):
+        from transformers import AutoConfig, Qwen3_5ForCausalLM
+
+        config = AutoConfig.from_pretrained(model_name)
+        text_config = (
+            config.get_text_config()
+            if hasattr(config, "get_text_config")
+            else getattr(config, "text_config", config)
+        )
+        return Qwen3_5ForCausalLM.from_pretrained(
+            model_name,
+            config=text_config,
+            device_map="auto",
+            torch_dtype=dtype,
+        )
+    return AutoModelForCausalLM.from_pretrained(
+        model_name, device_map="auto", torch_dtype=dtype,
+    )
+
+
+def _decoder_stack(model):
+    if isinstance(model, PeftModel):
+        inner = model.model
+        if hasattr(inner, "model"):
+            return inner.model
+        return inner
+    if hasattr(model, "model"):
+        return model.model
+    raise AttributeError(f"Could not resolve decoder stack on {type(model).__name__}")
 
 
 @dataclass
@@ -109,7 +148,7 @@ class LayerFeatures:
 @dataclass
 class CRISPConfig:
     layers: List[int]
-    model_name: Literal["gemma", "llama_3_1", "llama", "google/gemma-2-2b-it", "meta-llama/Llama-3.1-8B-Instruct"]
+    model_name: Literal["gemma", "llama_3_1", "llama", "google/gemma-2-2b-it", "meta-llama/Llama-3.1-8B-Instruct", "Qwen/Qwen3.5-2B"]
     bf16: bool = True
     saes_model_name: str = None
 
@@ -128,10 +167,14 @@ class CRISPConfig:
         elif model_name_lower in ("llama_3_1", "llama") or self.model_name == LLAMA_3_1_8B:
             self.model_name = LLAMA_3_1_8B
             self.saes_model_name = SAE_LLAMA_3_1_8B
+        elif self.model_name == QWEN35_2B_IT or "qwen3.5-2b" in model_name_lower:
+            self.model_name = QWEN35_2B_IT
+            self.saes_model_name = SAE_QWEN35_2B_IT
         else:
             raise ValueError(
                 f"Unsupported model name: {self.model_name}. "
-                f"Supported: 'gemma', 'llama', 'llama_3_1', '{GEMMA_2_2B_IT}', '{LLAMA_3_1_8B_IT}'."
+                f"Supported: 'gemma', 'llama', 'llama_3_1', '{GEMMA_2_2B_IT}', "
+                f"'{LLAMA_3_1_8B_IT}', '{QWEN35_2B_IT}'."
             )
 
     def to_dict(self):
@@ -159,7 +202,7 @@ class CRISP:
         )
         self.tokenizer = AutoTokenizer.from_pretrained(config.model_name)
         self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.model = AutoModelForCausalLM.from_pretrained(config.model_name, device_map='auto', torch_dtype=torch.bfloat16 if config.bf16 else torch.float32)
+        self.model = _load_hf_causal_lm(config.model_name, bf16=config.bf16)
         gemma_models = (GEMMA_2_2B, GEMMA_2_2B_IT)
         self.model.config.use_cache = False if config.model_name in gemma_models else True  # Gemma 2 has a bug with use_cache=True
         if config.model_name in gemma_models:
@@ -188,11 +231,7 @@ class CRISP:
         return output
 
     def register_hooks(self):
-        # if model wrapped with PeftModel, we need to get the inner model
-        if isinstance(self.model, PeftModel):
-            model = self.model.model.model
-        else:
-            model = self.model.model
+        model = _decoder_stack(self.model)
         for layer_idx in self.layers:
             layer = model.layers[layer_idx]
             bound_hook = partial(self.hook, layer_idx)

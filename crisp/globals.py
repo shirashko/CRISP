@@ -7,14 +7,20 @@ import random
 PROJECT_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GEMMA_SAE_CACHE_PATH = os.path.join(PROJECT_PATH, "crisp", "gemma_sae_cache")
 LLAMA_3_1_SAE_CACHE_PATH = os.path.join(PROJECT_PATH, "crisp", "llama_sae_cache")
+QWEN35_SAE_CACHE_PATH = os.path.join(PROJECT_PATH, "crisp", "qwen_sae_cache")
 SAE_LLAMA_3_1_8B = "fnlp/Llama3_1-8B-Base-LXR-8x"
 SAE_GEMMA_2_2B = "google/gemma-2-2b"
+SAE_QWEN35_2B = "Qwen/SAE-Res-Qwen3.5-2B-Base-W32K-L0_50"
 LLAMA_3_1_8B = "meta-llama/Llama-3.1-8B"
 GEMMA_2_2B = "google/gemma-2-2b"
+QWEN35_2B = "Qwen/Qwen3.5-2B"
+QWEN35_2B_BASE = "Qwen/Qwen3.5-2B-Base"
 LLAMA_3_1_8B_IT = "meta-llama/Llama-3.1-8B-Instruct"
 GEMMA_2_2B_IT = "google/gemma-2-2b-it"
+QWEN35_2B_IT = QWEN35_2B
 SAE_GEMMA_2_2B_IT = SAE_GEMMA_2_2B      # instruct model uses same SAE weights as base
 SAE_LLAMA_3_1_8B_IT = SAE_LLAMA_3_1_8B  # instruct model uses same SAE weights as base
+SAE_QWEN35_2B_IT = SAE_QWEN35_2B        # instruct model uses same SAE weights as base
 
 SEED = 0
 
