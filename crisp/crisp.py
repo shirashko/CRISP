@@ -16,14 +16,14 @@ from crisp_utils import load_cached_features, save_cached_features, print_memory
 from peft import PeftModel
 
 
-def _is_qwen35(model_name: str) -> bool:
+def _is_qwen(model_name: str) -> bool:
     n = model_name.lower()
     return "qwen3.5" in n or "qwen3_5" in n
 
 
 def _load_hf_causal_lm(model_name: str, *, bf16: bool = True):
     dtype = torch.bfloat16 if bf16 else torch.float32
-    if _is_qwen35(model_name):
+    if _is_qwen(model_name):
         from transformers import AutoConfig, Qwen3_5ForCausalLM
 
         config = AutoConfig.from_pretrained(model_name)
