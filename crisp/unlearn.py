@@ -295,6 +295,17 @@ def unlearn_lora(crisp: CRISP, text_target, text_benign, config: UnlearnConfig, 
     if not isinstance(crisp.model, PeftModel):
         # Configure LoRA
         target_modules = ['down_proj', 'gate_proj', 'up_proj', 'q_proj', 'v_proj', 'k_proj', 'o_proj']
+        # Qwen3.5: 18/24 layers are Gated DeltaNet. Those blocks have no q/k/v/o_proj,
+        # forget/update/output gates live on in_proj_{a,b,z} and fused QKV on in_proj_qkv.
+        model_name = getattr(crisp.config, "model_name", "")
+        if "qwen3.5" in model_name.lower() or "qwen3_5" in model_name.lower():
+            target_modules = target_modules + [
+                "in_proj_qkv",
+                "in_proj_z",
+                "in_proj_b",
+                "in_proj_a",
+                "out_proj",
+            ]
 
         lora_config = LoraConfig(
             init_lora_weights=True,

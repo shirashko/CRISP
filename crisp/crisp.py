@@ -204,7 +204,11 @@ class CRISP:
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.model = _load_hf_causal_lm(config.model_name, bf16=config.bf16)
         gemma_models = (GEMMA_2_2B, GEMMA_2_2B_IT)
-        self.model.config.use_cache = False if config.model_name in gemma_models else True  # Gemma 2 has a bug with use_cache=True
+        # Gemma 2: HF bug with use_cache=True. Qwen3.5: cached DeltaNet state
+        # distorts backprop during LoRA unlearning.
+        self.model.config.use_cache = False if (
+            config.model_name in gemma_models or _is_qwen(config.model_name)
+        ) else True
         if config.model_name in gemma_models:
             # Gemma IT ties lm_head to input embeddings by default; detach so embedding
             # edits don't silently corrupt the output projection.
