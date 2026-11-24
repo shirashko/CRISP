@@ -35,6 +35,8 @@ class UnlearnConfig:
 
     # Lora parameters
     lora_rank: int = 4
+    # None or "all" keeps the historical module set. "mlp" is down/gate/up only.
+    lora_targets: str | None = None
 
     # Model saving
     save_model: bool = False  # Whether to save the model after unlearning
@@ -273,6 +275,31 @@ def get_loss_func(original_outputs) -> callable:
     return partial(loss_features_acts, original_outputs=original_outputs)
 
 
+
+def lora_target_modules(model_name: str, lora_targets: str | None = None) -> list[str]:
+    """LoRA module names.
+
+    "down" is down_proj only. "mlp" is down/gate/up. Anything else keeps the
+    historical set, including attention and, on Qwen3.5, DeltaNet.
+    """
+    mlp = ["down_proj", "gate_proj", "up_proj"]
+    choice = (lora_targets or "all").lower()
+    if choice == "down":
+        return ["down_proj"]
+    if choice == "mlp":
+        return list(mlp)
+    if choice != "all":
+        raise ValueError(
+            f"lora_targets must be 'all', 'mlp', or 'down', got {lora_targets!r}"
+        )
+    modules = mlp + ["q_proj", "v_proj", "k_proj", "o_proj"]
+    name = (model_name or "").lower()
+    # Qwen3.5: 18/24 layers are Gated DeltaNet. Those blocks have no q/k/v/o_proj.
+    if "qwen3.5" in name or "qwen3_5" in name:
+        modules = modules + ["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj"]
+    return modules
+
+
 def unlearn_lora(crisp: CRISP, text_target, text_benign, config: UnlearnConfig, data_config: DataConfig = None):
     """
     Unlearns a concept using LoRA adapters instead of modifying base model weights.
@@ -293,19 +320,9 @@ def unlearn_lora(crisp: CRISP, text_target, text_benign, config: UnlearnConfig, 
     print(f"SEED: {SEED}")
 
     if not isinstance(crisp.model, PeftModel):
-        # Configure LoRA
-        target_modules = ['down_proj', 'gate_proj', 'up_proj', 'q_proj', 'v_proj', 'k_proj', 'o_proj']
-        # Qwen3.5: 18/24 layers are Gated DeltaNet. Those blocks have no q/k/v/o_proj,
-        # forget/update/output gates live on in_proj_{a,b,z} and fused QKV on in_proj_qkv.
+        # Configure LoRA. An unset lora_targets keeps attention and Qwen DeltaNet.
         model_name = getattr(crisp.config, "model_name", "")
-        if "qwen3.5" in model_name.lower() or "qwen3_5" in model_name.lower():
-            target_modules = target_modules + [
-                "in_proj_qkv",
-                "in_proj_z",
-                "in_proj_b",
-                "in_proj_a",
-                "out_proj",
-            ]
+        target_modules = lora_target_modules(model_name, config.lora_targets)
 
         lora_config = LoraConfig(
             init_lora_weights=True,
